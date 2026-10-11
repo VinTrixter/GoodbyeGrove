@@ -1,0 +1,9 @@
+# Ignore uploaded venue photos except default/placeholder image
+uploads/venues/*
+!uploads/venues/default.jpg
+
+# OS & IDE temp files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
