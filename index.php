@@ -93,9 +93,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         exit();
     }
 
-    if ($action === 'delete_venue') {
+    if ($action === 'archive_venue' || $action === 'delete_venue') {
+        // Venue records are never permanently deleted; archive them instead.
         $venueID = intval($_POST['venueID']);
-        $stmt = $conn->prepare("DELETE FROM venue WHERE venueID=?");
+        $stmt = $conn->prepare("UPDATE venue SET availability='Archived' WHERE venueID=?");
         $stmt->bind_param("i", $venueID);
         $stmt->execute();
         $stmt->close();
@@ -201,12 +202,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
         $daysUsed = max(1, round((strtotime($endDate) - strtotime($startDate)) / (60 * 60 * 24)));
 
-        $vStmt = $conn->prepare("SELECT baseprice FROM venue WHERE venueID = ?");
+        $vStmt = $conn->prepare("SELECT baseprice FROM venue WHERE venueID = ? AND COALESCE(NULLIF(TRIM(availability), ''), 'Archived') <> 'Archived'");
         $vStmt->bind_param("i", $venueID);
         $vStmt->execute();
         $vRes = $vStmt->get_result()->fetch_assoc();
-        $baseprice = $vRes ? $vRes['baseprice'] : 0;
         $vStmt->close();
+        if (!$vRes) {
+            // Reject attempts to book an archived or nonexistent venue.
+            header("Location: index.php#reservation");
+            exit();
+        }
+        $baseprice = $vRes['baseprice'];
 
         $totalPrice = $daysUsed * $baseprice;
 
@@ -354,10 +360,72 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     text-shadow: 0 1px 0 rgba(255,255,255,0.55);
     pointer-events: none;
   }
-  @media (max-width: 600px) {
+  .filter-bar {
+    display: flex;
+    align-items: end;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .filter-bar label {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #365939;
+  }
+  .filter-bar select,
+  .filter-bar input[type="date"],
+  .filter-bar input[type="text"] {
+    min-height: 38px;
+    padding: 7px 10px;
+    border: 1px solid #ccd6cc;
+    border-radius: 6px;
+    background: #fff;
+    color: #263528;
+    font: inherit;
+  }
+  .venue-pie-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 300px) minmax(220px, 1fr);
+    gap: 28px;
+    align-items: center;
+    margin-top: 20px;
+  }
+  .venue-pie-chart {
+    width: min(100%, 280px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    margin: 0 auto;
+    border: 1px solid rgba(0,0,0,0.08);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15);
+  }
+  .venue-pie-legend {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+  .venue-pie-legend-item {
+    display: grid;
+    grid-template-columns: 13px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.94rem;
+  }
+  .venue-pie-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+  .venue-pie-name { overflow-wrap: anywhere; }
+  .venue-pie-count { font-weight: 700; font-variant-numeric: tabular-nums; }
+  @media (max-width: 650px) {
     .venue-ranking-row { grid-template-columns: minmax(80px, 1fr) 44px minmax(0, 1.5fr); gap: 8px; }
     .venue-ranking-name { font-size: 0.9rem; }
     .venue-ranking-count { font-size: 0.9rem; }
+    .venue-pie-layout { grid-template-columns: 1fr; }
+    .venue-pie-chart { width: min(75vw, 260px); }
   }
 </style>
 </head>
@@ -392,7 +460,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       <div class="stats">
         <?php
           $bookingsCount = $conn->query("SELECT COUNT(*) AS total FROM booking")->fetch_assoc()['total'] ?? 0;
-          $availVenues   = $conn->query("SELECT COUNT(*) AS avail FROM venue WHERE availability = 'Available'")->fetch_assoc()['avail'] ?? 0;
+          $availVenues   = $conn->query("SELECT COUNT(*) AS avail FROM venue v WHERE COALESCE(NULLIF(TRIM(v.availability), ''), 'Archived') <> 'Archived' AND NOT EXISTS (SELECT 1 FROM booking b WHERE b.venueID = v.venueID AND b.bookingStatus = 'Confirmed' AND b.startDate <= '$today' AND b.endDate >= '$today')")->fetch_assoc()['avail'] ?? 0;
           $totalVenues   = $conn->query("SELECT COUNT(*) AS total FROM venue")->fetch_assoc()['total'] ?? 0;
           $pendingPay    = $conn->query("SELECT COUNT(*) AS pending FROM booking WHERE paymentStatus = 'Pending'")->fetch_assoc()['pending'] ?? 0;
         ?>
@@ -402,23 +470,55 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       </div>
       <div class="panel">
         <h3>Resource Availability Overview</h3>
+        <?php
+          $overviewFilter = $_GET['overview_filter'] ?? 'All';
+          if (!in_array($overviewFilter, ['All', 'Available', 'Booked', 'Archived'], true)) {
+              $overviewFilter = 'All';
+          }
+          $overviewSql = "SELECT v.*,
+              CASE
+                WHEN v.availability = 'Archived' OR v.availability IS NULL OR TRIM(v.availability) = '' THEN 'Archived'
+                WHEN EXISTS (SELECT 1 FROM booking b WHERE b.venueID = v.venueID AND b.bookingStatus = 'Confirmed' AND b.startDate <= '$today' AND b.endDate >= '$today') THEN 'Booked'
+                ELSE 'Available'
+              END AS todayStatus
+            FROM venue v";
+          if ($overviewFilter !== 'All') {
+              $overviewSql .= " HAVING todayStatus = '" . $conn->real_escape_string($overviewFilter) . "'";
+          }
+          $overviewSql .= " ORDER BY v.name ASC";
+          $res = $conn->query($overviewSql);
+        ?>
+        <form action="index.php" method="GET" class="filter-bar">
+          <label>Display:
+            <select name="overview_filter">
+              <?php foreach (['All', 'Available', 'Booked', 'Archived'] as $statusOption): ?>
+                <option value="<?php echo $statusOption; ?>" <?php if ($overviewFilter === $statusOption) echo 'selected'; ?>><?php echo $statusOption; ?></option>
+              <?php endforeach; ?>
+            </select>
+          </label>
+          <button class="btn" type="submit">Search</button>
+        </form>
         <table>
           <thead><tr><th>Resource Name</th><th>Category/Type</th><th>Capacity</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
-            <?php
-            $res = $conn->query("SELECT * FROM venue");
-            if ($res && $res->num_rows > 0):
-              while ($row = $res->fetch_assoc()):
+            <?php if ($res && $res->num_rows > 0): while ($row = $res->fetch_assoc()):
+              $todayStatus = $row['todayStatus'] ?: 'Archived';
             ?>
               <tr>
                 <td><?php echo htmlspecialchars($row['name']); ?></td>
                 <td><?php echo htmlspecialchars($row['type']); ?></td>
                 <td><?php echo htmlspecialchars($row['capacity']); ?></td>
-                <td class="<?php echo ($row['availability'] === 'Available') ? 'ok' : 'bad'; ?>"><?php echo htmlspecialchars($row['availability']); ?></td>
-                <td><a href="#book" class="btn ghost" style="padding: 2px 8px; font-size: 0.8rem;">Book</a></td>
+                <td class="<?php echo ($todayStatus === 'Available') ? 'ok' : 'bad'; ?>"><strong><?php echo htmlspecialchars($todayStatus); ?></strong></td>
+                <td><?php if ($todayStatus === 'Archived'): ?>
+                  <span class="bad" style="font-weight:600;">Archived</span>
+                <?php elseif ($todayStatus === 'Booked'): ?>
+                  <span style="color:#8a5a00;font-weight:600;">Booked today</span>
+                <?php else: ?>
+                  <a href="#book" class="btn ghost" style="padding: 2px 8px; font-size: 0.8rem;">Book</a>
+                <?php endif; ?></td>
               </tr>
             <?php endwhile; else: ?>
-              <tr><td colspan="5">No venues recorded in database.</td></tr>
+              <tr><td colspan="5">No venues match this filter.</td></tr>
             <?php endif; ?>
           </tbody>
         </table>
@@ -482,6 +582,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         if (!empty($searchType)) {
             $sql .= " AND v.type = '" . $conn->real_escape_string($searchType) . "'";
         }
+        // Archived venues remain in records but are not offered for booking.
+        $sql .= " AND COALESCE(NULLIF(TRIM(v.availability), ''), 'Archived') <> 'Archived'";
 
         $venueCards = $conn->query($sql);
 
@@ -582,8 +684,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 <td><?php echo htmlspecialchars($v['type']); ?></td>
                 <td><?php echo $v['capacity']; ?></td>
                 <td>Php <?php echo number_format($v['baseprice'], 2); ?></td>
-                <td class="<?php echo ($v['availability'] === 'Available') ? 'ok' : 'bad'; ?>"><?php echo htmlspecialchars($v['availability']); ?></td>
+                <td class="<?php echo ($v['availability'] === 'Available') ? 'ok' : 'bad'; ?>"><?php echo htmlspecialchars(($v['availability'] === 'Archived' || trim((string)$v['availability']) === '') ? 'Archived' : $v['availability']); ?></td>
                 <td>
+                  <?php if (!in_array(trim((string)$v['availability']), ['', 'Archived'], true)): ?>
                   <details style="display:inline-block;">
                     <summary class="btn ghost" style="padding:2px 6px; font-size:0.8rem;">Edit</summary>
                     <form action="index.php" method="POST" enctype="multipart/form-data" style="margin-top:8px; padding:10px; border:1px solid #ccc; background:#fff;">
@@ -613,11 +716,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                       <button class="btn" type="submit">Update</button>
                     </form>
                   </details>
-                  <form action="index.php" method="POST" style="display:inline-block;" onsubmit="return confirm('Delete this venue?');">
-                    <input type="hidden" name="action" value="delete_venue">
+                  <form action="index.php" method="POST" style="display:inline-block;" onsubmit="return confirm('Archive this venue? It will be kept in the records but will no longer be available for booking.');">
+                    <input type="hidden" name="action" value="archive_venue">
                     <input type="hidden" name="venueID" value="<?php echo $v['venueID']; ?>">
-                    <button class="btn ghost" style="color:var(--bad); border-color:var(--bad); padding:2px 6px; font-size:0.8rem;" type="submit">Delete</button>
+                    <button class="btn ghost" style="color:var(--bad); border-color:var(--bad); padding:2px 6px; font-size:0.8rem;" type="submit">Archive</button>
                   </form>
+                  <?php else: ?>
+                    <span class="bad" style="font-weight:600;">Archived</span>
+                  <?php endif; ?>
                 </td>
               </tr>
             <?php endwhile; else: ?>
@@ -766,19 +872,46 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         if (!in_array($bookingFilter, ['all', 'active', 'inactive'], true)) {
             $bookingFilter = 'all';
         }
+        $paymentFilter = $_GET['payment_filter'] ?? 'All';
+        if (!in_array($paymentFilter, ['All', 'Paid', 'Partial', 'Pending'], true)) {
+            $paymentFilter = 'All';
+        }
+        $bookingStartDate = trim($_GET['booking_start_date'] ?? '');
+        $bookingEndDate = trim($_GET['booking_end_date'] ?? '');
+        $bookingDateError = $bookingStartDate !== '' && $bookingEndDate !== '' && $bookingStartDate > $bookingEndDate;
       ?>
 
       <div class="panel">
-        <form action="index.php" method="GET" style="margin-bottom: 15px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <input type="text" name="search_booking" id="bookingSearchInput" placeholder="Search client or deceased name..." value="<?php echo htmlspecialchars($searchBooking); ?>" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; flex: 1; max-width: 360px;">
-          <div class="booking-filter" role="group" aria-label="Filter bookings by status">
-            <?php foreach (['all' => 'All', 'active' => 'Active', 'inactive' => 'Inactive'] as $filterValue => $filterLabel): ?>
-              <button type="submit" name="booking_filter" value="<?php echo $filterValue; ?>" class="booking-filter-btn <?php echo $bookingFilter === $filterValue ? 'selected' : ''; ?>" aria-pressed="<?php echo $bookingFilter === $filterValue ? 'true' : 'false'; ?>"><?php echo $filterLabel; ?></button>
-            <?php endforeach; ?>
-          </div>
-          <button class="btn" type="submit" name="booking_filter" value="<?php echo htmlspecialchars($bookingFilter); ?>">Search</button>
-          <?php if (!empty($searchBooking)): ?>
-            <a href="index.php?booking_filter=<?php echo urlencode($bookingFilter); ?>#bookings" class="btn ghost" style="padding: 6px 12px; text-decoration: none;">Clear Search</a>
+        <form action="index.php" method="GET" class="filter-bar" style="margin-bottom: 15px;">
+          <label>Display:
+            <select name="booking_filter">
+              <option value="all" <?php if ($bookingFilter === 'all') echo 'selected'; ?>>All</option>
+              <option value="active" <?php if ($bookingFilter === 'active') echo 'selected'; ?>>Active</option>
+              <option value="inactive" <?php if ($bookingFilter === 'inactive') echo 'selected'; ?>>Inactive</option>
+            </select>
+          </label>
+          <label>Payment Status:
+            <select name="payment_filter">
+              <?php foreach (['All', 'Paid', 'Partial', 'Pending'] as $paymentOption): ?>
+                <option value="<?php echo $paymentOption; ?>" <?php if ($paymentFilter === $paymentOption) echo 'selected'; ?>><?php echo $paymentOption; ?></option>
+              <?php endforeach; ?>
+            </select>
+          </label>
+          <label>Start Date:
+            <input type="date" name="booking_start_date" value="<?php echo htmlspecialchars($bookingStartDate); ?>" max="<?php echo htmlspecialchars($bookingEndDate); ?>">
+          </label>
+          <label>End Date:
+            <input type="date" name="booking_end_date" value="<?php echo htmlspecialchars($bookingEndDate); ?>" min="<?php echo htmlspecialchars($bookingStartDate); ?>">
+          </label>
+          <label>Client / Deceased Name (optional):
+            <input type="text" name="search_booking" id="bookingSearchInput" placeholder="Enter a name" value="<?php echo htmlspecialchars($searchBooking); ?>">
+          </label>
+          <button class="btn" type="submit">Search</button>
+          <?php if ($bookingFilter !== 'all' || $paymentFilter !== 'All' || $bookingStartDate !== '' || $bookingEndDate !== '' || $searchBooking !== ''): ?>
+            <a href="index.php#bookings" class="btn ghost" style="text-decoration:none;">Reset</a>
+          <?php endif; ?>
+          <?php if ($bookingDateError): ?>
+            <p role="alert" style="color:#b42318; flex-basis:100%; margin:0;">Start date cannot be after the end date.</p>
           <?php endif; ?>
         </form>
 
@@ -806,6 +939,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $bookingConditions[] = "b.bookingStatus = 'Confirmed'";
             } elseif ($bookingFilter === 'inactive') {
                 $bookingConditions[] = "b.bookingStatus <> 'Confirmed'";
+            }
+            if ($paymentFilter !== 'All') {
+                $bookingConditions[] = "b.paymentStatus = '" . $conn->real_escape_string($paymentFilter) . "'";
+            }
+            if ($bookingStartDate !== '' && !$bookingDateError) {
+                $bookingConditions[] = "b.startDate >= '" . $conn->real_escape_string($bookingStartDate) . "'";
+            }
+            if ($bookingEndDate !== '' && !$bookingDateError) {
+                $bookingConditions[] = "b.startDate <= '" . $conn->real_escape_string($bookingEndDate) . "'";
             }
             if (!empty($bookingConditions)) {
                 $bSql .= ' WHERE ' . implode(' AND ', $bookingConditions);
@@ -1072,8 +1214,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         <p style="color: #666; margin-top: -4px;">
           Number of booking records for each venue within the selected reporting period.
         </p>
-        <div class="venue-ranking">
-          <?php
+        <?php
           $venueCountCond = "";
           if (!empty($reportStartFrom)) {
               $escapedFrom = $conn->real_escape_string($reportStartFrom);
@@ -1083,7 +1224,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
               $escapedTo = $conn->real_escape_string($reportStartTo);
               $venueCountCond .= " AND b.startDate <= '$escapedTo'";
           }
-
           $venueCountSql = "
               SELECT v.venueID, v.name, COUNT(b.bookingID) AS bookingCount
               FROM venue v
@@ -1093,33 +1233,56 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
           ";
           $venueCountResult = $conn->query($venueCountSql);
           $venueCounts = [];
-          $maxVenueBookings = 0;
+          $totalVenueBookings = 0;
+          $pieColors = ['#365939', '#6F9E76', '#D6A84F', '#527AA3', '#B66D59', '#8B79B8', '#3D9A9A', '#C477A8', '#8B8F45', '#7A6A5D', '#D17B36', '#5B8DAB'];
           if ($venueCountResult) {
               while ($venueCountRow = $venueCountResult->fetch_assoc()) {
+                  $venueCountRow['bookingCount'] = (int)$venueCountRow['bookingCount'];
                   $venueCounts[] = $venueCountRow;
-                  $maxVenueBookings = max($maxVenueBookings, (int) $venueCountRow['bookingCount']);
+                  $totalVenueBookings += $venueCountRow['bookingCount'];
               }
           }
-
-          if (!empty($venueCounts)):
-              foreach ($venueCounts as $venueCountRow):
-                  $bookingCount = (int) $venueCountRow['bookingCount'];
-                  $barWidth = $maxVenueBookings > 0 ? ($bookingCount / $maxVenueBookings) * 100 : 0;
-          ?>
-            <div class="venue-ranking-row">
-              <div class="venue-ranking-name" title="<?php echo htmlspecialchars($venueCountRow['name']); ?>"><?php echo htmlspecialchars($venueCountRow['name']); ?></div>
-              <div class="venue-ranking-count"><?php echo $bookingCount; ?></div>
-              <div class="venue-bar-track" role="img" aria-label="<?php echo htmlspecialchars($venueCountRow['name']); ?>: <?php echo $bookingCount; ?> bookings">
-                <div class="venue-bar-fill" style="width: <?php echo $barWidth; ?>%;"></div>
-              </div>
+          $pieSegments = [];
+          $pieLegend = [];
+          $currentAngle = 0;
+          foreach ($venueCounts as $i => $venueCountRow) {
+              $count = $venueCountRow['bookingCount'];
+              $color = $pieColors[$i % count($pieColors)];
+              $pieLegend[] = ['name' => $venueCountRow['name'], 'count' => $count, 'color' => $color];
+              if ($totalVenueBookings > 0 && $count > 0) {
+                  $nextAngle = $currentAngle + ($count / $totalVenueBookings) * 360;
+                  $pieSegments[] = $color . ' ' . number_format($currentAngle, 3, '.', '') . 'deg ' . number_format($nextAngle, 3, '.', '') . 'deg';
+                  $currentAngle = $nextAngle;
+              }
+          }
+        ?>
+        <?php if ($totalVenueBookings > 0): ?>
+          <div class="venue-pie-layout">
+            <div class="venue-pie-chart" role="img" aria-label="Pie chart showing <?php echo $totalVenueBookings; ?> bookings distributed across venues" style="background: conic-gradient(<?php echo implode(', ', $pieSegments); ?>);"></div>
+            <div class="venue-pie-legend" aria-label="Venue booking chart legend">
+              <?php foreach ($pieLegend as $legendItem): ?>
+                <div class="venue-pie-legend-item">
+                  <span class="venue-pie-swatch" style="background:<?php echo htmlspecialchars($legendItem['color']); ?>;"></span>
+                  <span class="venue-pie-name"><?php echo htmlspecialchars($legendItem['name']); ?></span>
+                  <span class="venue-pie-count"><?php echo $legendItem['count']; ?> bookings</span>
+                </div>
+              <?php endforeach; ?>
             </div>
-          <?php
-              endforeach;
-          else:
-          ?>
-            <p>No venues found in the database.</p>
+          </div>
+        <?php else: ?>
+          <p>No bookings recorded for the selected reporting period.</p>
+          <?php if (!empty($pieLegend)): ?>
+            <div class="venue-pie-legend" aria-label="Venue booking chart legend" style="margin-top:16px;">
+              <?php foreach ($pieLegend as $legendItem): ?>
+                <div class="venue-pie-legend-item">
+                  <span class="venue-pie-swatch" style="background:<?php echo htmlspecialchars($legendItem['color']); ?>;"></span>
+                  <span class="venue-pie-name"><?php echo htmlspecialchars($legendItem['name']); ?></span>
+                  <span class="venue-pie-count">0 bookings</span>
+                </div>
+              <?php endforeach; ?>
+            </div>
           <?php endif; ?>
-        </div>
+        <?php endif; ?>
       </div>
     </section>
 
