@@ -776,6 +776,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       <?php
         $reportStartFrom = trim($_GET['report_start_from'] ?? '');
         $reportStartTo   = trim($_GET['report_start_to'] ?? '');
+        $reportDateError = (!empty($reportStartFrom) && !empty($reportStartTo) && $reportStartFrom > $reportStartTo);
       ?>
 
       <!-- Print/PDF Specific Header Banner -->
@@ -795,13 +796,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       <div class="panel" style="margin-bottom: 24px;">
         <form action="index.php" method="GET" class="report-filter-bar">
           <label>
-            Start Date From: 
-            <input type="date" name="report_start_from" value="<?php echo htmlspecialchars($reportStartFrom); ?>">
+            Start Date:
+            <input type="date" id="reportStartDate" name="report_start_from" value="<?php echo htmlspecialchars($reportStartFrom); ?>" max="<?php echo htmlspecialchars($reportStartTo); ?>">
           </label>
           <label>
-            Start Date To: 
-            <input type="date" name="report_start_to" value="<?php echo htmlspecialchars($reportStartTo); ?>">
+            End Date:
+            <input type="date" id="reportEndDate" name="report_start_to" value="<?php echo htmlspecialchars($reportStartTo); ?>" min="<?php echo htmlspecialchars($reportStartFrom); ?>">
           </label>
+          <?php if ($reportDateError): ?>
+            <p style="color: #b42318; width: 100%; margin: 0;" role="alert">Start date cannot be after the end date.</p>
+          <?php endif; ?>
           <button class="btn" type="submit">Filter Reports</button>
           <?php if (!empty($reportStartFrom) || !empty($reportStartTo)): ?>
             <a href="index.php#reports" class="btn ghost" style="text-decoration: none;">Reset Filter</a>
@@ -966,6 +970,52 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             <?php endif; ?>
           </tbody>
         </table>
+      </div>
+
+      <!-- Third Report: Booking Count per Venue -->
+      <div class="panel">
+        <h3>3. Booking Count per Venue</h3>
+        <p style="color: #666; margin-top: -4px;">
+          Number of booking records for each venue within the selected reporting period.
+        </p>
+        <div class="cards">
+          <?php
+          $venueCountCond = "";
+          if (!empty($reportStartFrom)) {
+              $escapedFrom = $conn->real_escape_string($reportStartFrom);
+              $venueCountCond .= " AND b.startDate >= '$escapedFrom'";
+          }
+          if (!empty($reportStartTo)) {
+              $escapedTo = $conn->real_escape_string($reportStartTo);
+              $venueCountCond .= " AND b.startDate <= '$escapedTo'";
+          }
+
+          $venueCountSql = "
+              SELECT v.venueID, v.name, COUNT(b.bookingID) AS bookingCount
+              FROM venue v
+              LEFT JOIN booking b ON v.venueID = b.venueID $venueCountCond
+              GROUP BY v.venueID, v.name
+              ORDER BY bookingCount DESC, v.name ASC
+          ";
+          $venueCountResult = $conn->query($venueCountSql);
+
+          if ($venueCountResult && $venueCountResult->num_rows > 0):
+              while ($venueCountRow = $venueCountResult->fetch_assoc()):
+          ?>
+            <article class="card">
+              <h3><?php echo htmlspecialchars($venueCountRow['name']); ?></h3>
+              <p style="margin: 8px 0 2px;">Times Booked</p>
+              <strong style="display: block; font-size: 1.8rem; color: var(--emerald);">
+                <?php echo (int) $venueCountRow['bookingCount']; ?>
+              </strong>
+            </article>
+          <?php
+              endwhile;
+          else:
+          ?>
+            <p>No venues found in the database.</p>
+          <?php endif; ?>
+        </div>
       </div>
     </section>
 
@@ -1187,6 +1237,9 @@ function handleBookingSubmit(e) {
 function enforceAllMinDates() {
   const dateInputs = document.querySelectorAll('input[type="date"]');
   dateInputs.forEach(input => {
+    // Report filters must allow historical dates; only booking/search dates use today's minimum.
+    if (input.name === 'report_start_from' || input.name === 'report_start_to') return;
+
     input.setAttribute('min', todayStr);
     input.addEventListener('change', function() {
       if (this.value && this.value < todayStr && this.id !== 'resEndDate') {
@@ -1194,6 +1247,38 @@ function enforceAllMinDates() {
       }
     });
   });
+}
+
+function setupReportDateFilters() {
+  const startInput = document.getElementById('reportStartDate');
+  const endInput = document.getElementById('reportEndDate');
+  if (!startInput || !endInput) return;
+
+  function syncDateLimits() {
+    endInput.min = startInput.value || '';
+    startInput.max = endInput.value || '';
+
+    // Keep invalid ranges from being submitted, including dates typed manually.
+    if (startInput.value && endInput.value && startInput.value > endInput.value) {
+      startInput.setCustomValidity('Start date cannot be after the end date.');
+      endInput.setCustomValidity('End date cannot be before the start date.');
+    } else {
+      startInput.setCustomValidity('');
+      endInput.setCustomValidity('');
+    }
+  }
+
+  startInput.addEventListener('change', syncDateLimits);
+  endInput.addEventListener('change', syncDateLimits);
+  startInput.form.addEventListener('submit', function(event) {
+    syncDateLimits();
+    if (!startInput.checkValidity() || !endInput.checkValidity()) {
+      event.preventDefault();
+      startInput.reportValidity();
+      endInput.reportValidity();
+    }
+  });
+  syncDateLimits();
 }
 
 function switchRole(role) {
@@ -1234,6 +1319,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (selector) selector.value = savedRole;
 
   enforceAllMinDates();
+  setupReportDateFilters();
 
   const urlParams = new URLSearchParams(window.location.search);
   if ((urlParams.has('search_type') || urlParams.has('search_date')) && !location.hash) {
