@@ -275,6 +275,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Goodbye Grove - Resource Management</title>
+<link rel="icon" type="image/x-icon" href="iconLogo.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Nunito+Sans:wght@400;600&display=swap" rel="stylesheet">
@@ -431,7 +432,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 </head>
 <body>
 <header>
-  <h1>Goodbye Grove</h1>
+  <div class="site-brand" style="display:flex; align-items:center; gap:12px; min-width:0;">
+    <img src="logo.png" alt="Goodbye Grove logo" style="display:block; width:52px; height:52px; object-fit:contain; flex-shrink:0;">
+    <h1 style="margin:0;">Goodbye Grove</h1>
+  </div>
   <div>
     <label for="roleSelector" style="font-size: 0.9rem; margin-right: 6px;">Logged in View:</label>
     <select id="roleSelector" onchange="switchRole(this.value)" style="padding: 4px; border-radius: 4px;">
