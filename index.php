@@ -283,6 +283,82 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
   input[type=number] {
     -moz-appearance: textfield;
   }
+  .booking-filter {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    background: #f1f5f1;
+    border: 1px solid #d8e2d8;
+    border-radius: 8px;
+  }
+  .booking-filter-btn {
+    border: 0;
+    border-radius: 5px;
+    padding: 7px 13px;
+    background: transparent;
+    color: #365939;
+    font: inherit;
+    cursor: pointer;
+  }
+  .booking-filter-btn.selected {
+    background: #365939;
+    color: #fff;
+  }
+  .venue-ranking {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 18px;
+  }
+  .venue-ranking-row {
+    display: grid;
+    grid-template-columns: minmax(130px, 240px) 64px minmax(0, 1fr);
+    align-items: center;
+    gap: 18px;
+  }
+  .venue-ranking-name {
+    min-width: 0;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .venue-ranking-count {
+    text-align: right;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .venue-bar-track {
+    position: relative;
+    height: 30px;
+    min-width: 0;
+    overflow: hidden;
+    border-radius: 6px;
+    background: #edf1ed;
+  }
+  .venue-bar-fill {
+    height: 100%;
+    min-width: 0;
+    border-radius: 6px;
+    background: #527d55;
+    transition: width 0.25s ease;
+  }
+  .venue-bar-count {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    color: #1f3321;
+    font-weight: 700;
+    font-size: 0.9rem;
+    text-shadow: 0 1px 0 rgba(255,255,255,0.55);
+    pointer-events: none;
+  }
+  @media (max-width: 600px) {
+    .venue-ranking-row { grid-template-columns: minmax(80px, 1fr) 44px minmax(0, 1.5fr); gap: 8px; }
+    .venue-ranking-name { font-size: 0.9rem; }
+    .venue-ranking-count { font-size: 0.9rem; }
+  }
 </style>
 </head>
 <body>
@@ -686,14 +762,23 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
       <?php
         $searchBooking = trim($_GET['search_booking'] ?? '');
+        $bookingFilter = $_GET['booking_filter'] ?? 'all';
+        if (!in_array($bookingFilter, ['all', 'active', 'inactive'], true)) {
+            $bookingFilter = 'all';
+        }
       ?>
 
       <div class="panel">
-        <form action="index.php" method="GET" style="margin-bottom: 15px; display: flex; gap: 8px; align-items: center;">
-          <input type="text" name="search_booking" id="bookingSearchInput" placeholder="Search client or deceased name..." value="<?php echo htmlspecialchars($searchBooking); ?>" onkeyup="filterBookingTable()" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; flex: 1; max-width: 360px;">
-          <button class="btn" type="submit">Search</button>
+        <form action="index.php" method="GET" style="margin-bottom: 15px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <input type="text" name="search_booking" id="bookingSearchInput" placeholder="Search client or deceased name..." value="<?php echo htmlspecialchars($searchBooking); ?>" style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; flex: 1; max-width: 360px;">
+          <div class="booking-filter" role="group" aria-label="Filter bookings by status">
+            <?php foreach (['all' => 'All', 'active' => 'Active', 'inactive' => 'Inactive'] as $filterValue => $filterLabel): ?>
+              <button type="submit" name="booking_filter" value="<?php echo $filterValue; ?>" class="booking-filter-btn <?php echo $bookingFilter === $filterValue ? 'selected' : ''; ?>" aria-pressed="<?php echo $bookingFilter === $filterValue ? 'true' : 'false'; ?>"><?php echo $filterLabel; ?></button>
+            <?php endforeach; ?>
+          </div>
+          <button class="btn" type="submit" name="booking_filter" value="<?php echo htmlspecialchars($bookingFilter); ?>">Search</button>
           <?php if (!empty($searchBooking)): ?>
-            <a href="index.php#bookings" class="btn ghost" style="padding: 6px 12px; text-decoration: none;">Clear Search</a>
+            <a href="index.php?booking_filter=<?php echo urlencode($bookingFilter); ?>#bookings" class="btn ghost" style="padding: 6px 12px; text-decoration: none;">Clear Search</a>
           <?php endif; ?>
         </form>
 
@@ -709,12 +794,21 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
               LEFT JOIN employee e ON b.empID = e.empID
             ";
 
+            $bookingConditions = [];
             if (!empty($searchBooking)) {
                 $escapedSearch = $conn->real_escape_string($searchBooking);
-                $bSql .= " WHERE (c.firstName LIKE '%$escapedSearch%' 
-                                OR c.lastName LIKE '%$escapedSearch%' 
+                $bookingConditions[] = "(c.firstName LIKE '%$escapedSearch%'
+                                OR c.lastName LIKE '%$escapedSearch%'
                                 OR CONCAT(c.firstName, ' ', c.lastName) LIKE '%$escapedSearch%'
-                                OR b.deceasedName LIKE '%$escapedSearch%') ";
+                                OR b.deceasedName LIKE '%$escapedSearch%')";
+            }
+            if ($bookingFilter === 'active') {
+                $bookingConditions[] = "b.bookingStatus = 'Confirmed'";
+            } elseif ($bookingFilter === 'inactive') {
+                $bookingConditions[] = "b.bookingStatus <> 'Confirmed'";
+            }
+            if (!empty($bookingConditions)) {
+                $bSql .= ' WHERE ' . implode(' AND ', $bookingConditions);
             }
 
             $bSql .= " ORDER BY b.bookingID DESC";
@@ -978,7 +1072,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         <p style="color: #666; margin-top: -4px;">
           Number of booking records for each venue within the selected reporting period.
         </p>
-        <div class="cards">
+        <div class="venue-ranking">
           <?php
           $venueCountCond = "";
           if (!empty($reportStartFrom)) {
@@ -998,19 +1092,29 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
               ORDER BY bookingCount DESC, v.name ASC
           ";
           $venueCountResult = $conn->query($venueCountSql);
+          $venueCounts = [];
+          $maxVenueBookings = 0;
+          if ($venueCountResult) {
+              while ($venueCountRow = $venueCountResult->fetch_assoc()) {
+                  $venueCounts[] = $venueCountRow;
+                  $maxVenueBookings = max($maxVenueBookings, (int) $venueCountRow['bookingCount']);
+              }
+          }
 
-          if ($venueCountResult && $venueCountResult->num_rows > 0):
-              while ($venueCountRow = $venueCountResult->fetch_assoc()):
+          if (!empty($venueCounts)):
+              foreach ($venueCounts as $venueCountRow):
+                  $bookingCount = (int) $venueCountRow['bookingCount'];
+                  $barWidth = $maxVenueBookings > 0 ? ($bookingCount / $maxVenueBookings) * 100 : 0;
           ?>
-            <article class="card">
-              <h3><?php echo htmlspecialchars($venueCountRow['name']); ?></h3>
-              <p style="margin: 8px 0 2px;">Times Booked</p>
-              <strong style="display: block; font-size: 1.8rem; color: var(--emerald);">
-                <?php echo (int) $venueCountRow['bookingCount']; ?>
-              </strong>
-            </article>
+            <div class="venue-ranking-row">
+              <div class="venue-ranking-name" title="<?php echo htmlspecialchars($venueCountRow['name']); ?>"><?php echo htmlspecialchars($venueCountRow['name']); ?></div>
+              <div class="venue-ranking-count"><?php echo $bookingCount; ?></div>
+              <div class="venue-bar-track" role="img" aria-label="<?php echo htmlspecialchars($venueCountRow['name']); ?>: <?php echo $bookingCount; ?> bookings">
+                <div class="venue-bar-fill" style="width: <?php echo $barWidth; ?>%;"></div>
+              </div>
+            </div>
           <?php
-              endwhile;
+              endforeach;
           else:
           ?>
             <p>No venues found in the database.</p>
